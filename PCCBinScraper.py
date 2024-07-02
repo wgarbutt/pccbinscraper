@@ -5,6 +5,14 @@ from datetime import datetime, timedelta
 import requests
 import paho.mqtt.client as mqtt
 import schedule
+import logging
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    datefmt='%Y-%m-%d %H:%M:%S'
+)
 
 # Get configuration from environment variables
 address = os.environ.get('ADDRESS', 'YOUR ADDRESS')
@@ -12,17 +20,34 @@ mqtt_broker = os.environ.get('MQTT_BROKER', 'IP OF MQTT SERVER')
 mqtt_port = int(os.environ.get('MQTT_PORT', 1883))
 mqtt_username = os.environ.get('MQTT_USERNAME', 'username')
 mqtt_password = os.environ.get('MQTT_PASSWORD', 'password')
-run_frequency = os.environ.get('RUN_FREQUENCY', 'daily')  # New parameter
+run_frequency = os.environ.get('RUN_FREQUENCY', 'daily')
 
-# ... (keep existing function definitions: on_connect, on_publish, get_current_week, get_next_collection_date)
+logging.info(f"Configuration loaded. Address: {address}, MQTT Broker: {mqtt_broker}, Run Frequency: {run_frequency}")
+
+def on_connect(client, userdata, flags, rc):
+    if rc == 0:
+        logging.info("Connected to MQTT broker.")
+    else:
+        logging.error(f"Failed to connect to MQTT broker. Error code: {rc}")
+
+def on_publish(client, userdata, mid):
+    logging.info("Message published to MQTT broker.")
+
+def get_current_week():
+    return datetime.now().isocalendar()[1]
+
+def get_next_collection_date(collection_day):
+    days = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday']
+    today = datetime.now()
+    collection_day_index = days.index(collection_day)
+    days_until_collection = (collection_day_index - today.weekday() + 7) % 7
+    next_collection = today + timedelta(days=days_until_collection)
+    return next_collection.strftime("%A, %d %B %Y")
 
 def main_job():
-    print(f"Running job at {datetime.now()}")
+    logging.info("Starting main job")
     
-    # URL of the API endpoint
     base_url = 'https://maps.poriruacity.govt.nz/server/rest/services/Property/PropertyAdminExternal/MapServer/5/query'
-
-    # Prepare the query parameters
     params = {
         'where': f"lower(address) LIKE '%{address.lower()}%'",
         'f': 'pjson',
@@ -32,60 +57,63 @@ def main_job():
         'orderByFields': 'Address'
     }
 
-    # Make the API request
-    response = requests.get(base_url, params=params)
-    data = response.json()
-
-    if not data['features']:
-        print("Address not found")
-        return
-
-    # Get the first address result
-    first_address = data['features'][0]['attributes']
-    collection_day = first_address['Collection_Day']
-    collection_zone = first_address['Collection_Zone']
-
-    print(f"Collection Day: {collection_day}")
-    print(f"Collection Zone: {collection_zone}")
-
-    next_collection = get_next_collection_date(collection_day)
-
-    recycling_data = {
-        next_collection: ["General Waste", "Recycling"]  # This is a placeholder. Adjust based on actual data.
-    }
-
-    # Initialize the MQTT client
-    mqtt_client = mqtt.Client()
-    mqtt_client.username_pw_set(mqtt_username, mqtt_password)
-
-    # Connect to the MQTT broker
-    print("Connecting to MQTT broker...")
     try:
-        mqtt_client.connect(mqtt_broker, mqtt_port, 60)
-    except Exception as e:
-        print("Error connecting to MQTT broker:", e)
-        return
+        logging.info("Making API request")
+        response = requests.get(base_url, params=params)
+        response.raise_for_status()  # Raises an HTTPError for bad responses
+        data = response.json()
 
-    # Publish the recycling items to MQTT as JSON
-    for date, keywords in recycling_data.items():
-        keyword_list = ", ".join(keywords)
-        message = {
-            "Date": date,
-            "Contains": keyword_list
+        if not data['features']:
+            logging.warning("Address not found")
+            return
+
+        first_address = data['features'][0]['attributes']
+        collection_day = first_address['Collection_Day']
+        collection_zone = first_address['Collection_Zone']
+
+        logging.info(f"Collection Day: {collection_day}")
+        logging.info(f"Collection Zone: {collection_zone}")
+
+        next_collection = get_next_collection_date(collection_day)
+        logging.info(f"Next collection date: {next_collection}")
+
+        recycling_data = {
+            next_collection: ["General Waste", "Recycling"]  # This is a placeholder. Adjust based on actual data.
         }
-        topic = "recycling_schedule"
-        json_message = json.dumps(message)
-        print(f"Publishing message: {json_message} to topic: {topic}")
-        try:
-            mqtt_client.publish(topic, json_message, retain=True)
-        except Exception as e:
-            print("Error publishing message to MQTT:", e)
 
-    # Disconnect from the MQTT broker
-    mqtt_client.disconnect()
-    print("Disconnected from MQTT broker.")
+        mqtt_client = mqtt.Client()
+        mqtt_client.username_pw_set(mqtt_username, mqtt_password)
+
+        mqtt_client.on_connect = on_connect
+        mqtt_client.on_publish = on_publish
+
+        logging.info("Connecting to MQTT broker...")
+        mqtt_client.connect(mqtt_broker, mqtt_port, 60)
+
+        for date, keywords in recycling_data.items():
+            keyword_list = ", ".join(keywords)
+            message = {
+                "Date": date,
+                "Contains": keyword_list
+            }
+            topic = "recycling_schedule"
+            json_message = json.dumps(message)
+            logging.info(f"Publishing message: {json_message} to topic: {topic}")
+            mqtt_client.publish(topic, json_message, retain=True)
+
+        mqtt_client.disconnect()
+        logging.info("Disconnected from MQTT broker.")
+
+    except requests.RequestException as e:
+        logging.error(f"API request failed: {str(e)}")
+    except Exception as e:
+        logging.error(f"An unexpected error occurred: {str(e)}", exc_info=True)
+
+    logging.info("Main job completed")
 
 def run_scheduler():
+    logging.info(f"Setting up scheduler to run {run_frequency}")
+    
     if run_frequency == 'hourly':
         schedule.every().hour.do(main_job)
     elif run_frequency == 'daily':
@@ -93,14 +121,21 @@ def run_scheduler():
     elif run_frequency == 'weekly':
         schedule.every().monday.at("00:00").do(main_job)
     else:
-        print(f"Invalid run frequency: {run_frequency}. Using daily as default.")
+        logging.warning(f"Invalid run frequency: {run_frequency}. Using daily as default.")
         schedule.every().day.at("00:00").do(main_job)
 
-    print(f"Scheduler set to run {run_frequency}")
-    
+    logging.info("Scheduler set up complete. Starting main loop.")
     while True:
         schedule.run_pending()
         time.sleep(1)
 
 if __name__ == "__main__":
-    run_scheduler()
+    logging.info("Script started")
+    try:
+        run_scheduler()
+    except KeyboardInterrupt:
+        logging.info("Script terminated by user")
+    except Exception as e:
+        logging.error(f"An unexpected error occurred: {str(e)}", exc_info=True)
+    finally:
+        logging.info("Script ended")
