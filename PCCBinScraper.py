@@ -46,6 +46,7 @@ def get_next_collection_date(collection_day):
 
 def main_job():
     logging.info("Starting main job")
+    logging.info(f"Current time: {datetime.now()}")
     
     base_url = 'https://maps.poriruacity.govt.nz/server/rest/services/Property/PropertyAdminExternal/MapServer/5/query'
     params = {
@@ -124,10 +125,14 @@ def run_scheduler():
         logging.warning(f"Invalid run frequency: {run_frequency}. Using daily as default.")
         schedule.every().day.at("00:00").do(main_job)
 
-    logging.info("Scheduler set up complete. Starting main loop.")
+    logging.info("Scheduler set up complete. Running initial job and starting main loop.")
+    main_job()  # Run the job immediately
+    
     while True:
         schedule.run_pending()
-        time.sleep(1)
+        time.sleep(10)
+        logging.info("Scheduler is running. Waiting for next job execution.")
+
 
 if __name__ == "__main__":
     logging.info("Script started")
