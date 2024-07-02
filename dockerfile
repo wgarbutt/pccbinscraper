@@ -14,4 +14,4 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY recycling_scraper.py .
 
 # Run the script when the container launches
-CMD ["python", "recycling_scraper.py"]
+CMD ["python", "PCCBinScraper.py"]
